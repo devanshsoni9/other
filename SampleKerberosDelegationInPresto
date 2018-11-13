@@ -1,0 +1,92 @@
+public void run() {
+        System.out.println(this.connectionId + " Running Connection Worker " + Thread.currentThread().getName());
+		
+		// login with Kerberos
+        this.serviceSubject = doLogin();
+        try {
+            // Get impersonated user credentials
+              this.impersonatedUserCreds = impersonate();
+        } catch (Exception ex) {
+            System.out.println(this.connectionId + " Exception caught in impersonate ");
+            ex.printStackTrace();
+        }
+
+        if (impersonatedUserCreds != null) {
+            try {
+                // Create a connection for target service thanks S4U2proxy mechanism
+                Connection con = createConnection(impersonatedUserCreds);
+                System.out.println(this.connectionId + " Connection successful : " + con);
+
+                ResultSet result = con.createStatement().executeQuery(getQuery());
+                while (result.next()) {
+                    System.out.println(this.connectionId + " query results : " + result.getString(1));
+                }
+            } catch (Exception ex) {
+
+                System.out.println(this.connectionId + " Exception caught in createConnection ");
+                ex.printStackTrace();
+            }
+        }
+
+        System.out.println(Thread.currentThread().getName() + " End." + this.connectionId);
+    }
+
+    protected Subject doLogin() {
+        try {
+            LoginContext loginContext = new LoginContext(<MY-SERVICE-PRINCIPAL-NAME>, new KerberosCallbackHandler());
+            loginContext.login();
+            return loginContext.getSubject();
+        } catch (LoginException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    protected String getQuery() {
+        return "SELECT * FROM default.test LIMIT 1";
+    }
+
+    /**
+     * Generate the impersonated user credentials thanks to the S4U2self mechanism
+     *
+     * @return the client impersonated GSSCredential
+     * @throws PrivilegedActionException in case of failure
+     */
+    protected GSSCredential impersonate() throws PrivilegedActionException {
+
+        return Subject.doAs(this.serviceSubject, (PrivilegedExceptionAction<GSSCredential>) () -> {
+            GSSManager manager = GSSManager.getInstance();
+            GSSName selfName = manager.createName(<MY-SERVICE-PRINCIPAL-NAME>, GSSName.NT_USER_NAME);
+
+            GSSCredential selfCreds = manager.createCredential(selfName, 4*3600, krb5Oid,
+                    GSSCredential.INITIATE_ONLY);
+            GSSName dbUser = manager.createName(<DB-USER-NAME>, GSSName.NT_USER_NAME);
+
+            return ((ExtendedGSSCredential) selfCreds).impersonate(dbUser);
+        });
+    }
+
+    /**
+     * Obtains a connection using an impersonated credential
+     *
+     * @param impersonatedUserCredential impersonated user credentials
+     * @return a connection to the presto Server opened using the given impersonated credential
+     * @throws PrivilegedActionException in case of failure
+     */
+    protected Connection createConnection(final GSSCredential impersonatedUserCredential)
+            throws PrivilegedActionException {
+        return Subject.doAs(this.serviceSubject, (PrivilegedExceptionAction<Connection>) () -> {
+            driverProperties.put("user", <DB-USER-NAME>);
+            driverProperties.put("SSL","true");
+            driverProperties.put("SSLTrustStorePath", "prestoTrustStore");
+            driverProperties.put("SSLTrustStorePassword","password");
+            driverProperties.put("KerberosRemoteServiceName","presto");
+            driverProperties.put("KerberosPrincipal",<MY-SERVICE-PRINCIPAL-NAME>);
+            driverProperties.put("KerberosUseCanonicalHostname", "false");
+            driverProperties.put("KerberosConfigPath","krb5.conf");
+            driverProperties.put("KerberosKeytabPath","keyTabFile.keytab");
+            driverProperties.put("userCredential",impersonatedUserCredential);
+
+            return DriverManager.getConnection(PRESTO_CONNECTION_URI, driverProperties);
+        });
+    }
